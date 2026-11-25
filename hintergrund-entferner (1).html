@@ -1,0 +1,450 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Hintergrund-Entferner</title>
+<style>
+  :root { --bg:#f5f6f8; --card:#fff; --text:#17181c; --muted:#666b76; --line:#d9dce3; --accent:#4f46e5; --err:#c02626; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#111216; --card:#1b1d23; --text:#eef0f4; --muted:#9aa0ac; --line:#30333c; --accent:#818cf8; --err:#f87171; }
+  }
+  * { box-sizing:border-box; }
+  body { margin:0; font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif; background:var(--bg); color:var(--text); }
+  main { max-width:1000px; margin:0 auto; padding:32px 16px 64px; }
+  h1 { margin:0 0 6px; font-size:2rem; }
+  p.sub { margin:0 0 24px; color:var(--muted); }
+  #drop { display:block; border:2px dashed var(--line); border-radius:16px; background:var(--card); padding:48px 20px; text-align:center; cursor:pointer; }
+  #drop:hover, #drop.over, #drop:focus-visible { border-color:var(--accent); }
+  #drop strong { display:block; font-size:1.2rem; margin-bottom:6px; }
+  #drop span { color:var(--muted); font-size:.9rem; }
+  .toolbar { display:flex; flex-wrap:wrap; gap:12px 20px; align-items:center; margin:18px 0; }
+  select, button, .btn { font:inherit; border-radius:8px; border:1px solid var(--line); background:var(--card); color:var(--text); padding:8px 14px; }
+  button, .btn { cursor:pointer; }
+  .primary { background:var(--accent); border-color:var(--accent); color:#fff; }
+  button:disabled { opacity:.45; cursor:default; }
+  input[type=color] { width:44px; height:36px; padding:2px; vertical-align:middle; border:1px solid var(--line); border-radius:8px; background:var(--card); }
+  #list { display:grid; grid-template-columns:repeat(auto-fill,minmax(min(100%,420px),1fr)); gap:18px; }
+  .item { background:var(--card); border:1px solid var(--line); border-radius:14px; padding:14px; min-width:0; }
+  .name { font-weight:600; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; margin-bottom:10px; }
+  .pair { display:grid; grid-template-columns:1fr 1fr; gap:10px; }
+  figure { margin:0; min-width:0; }
+  figcaption { font-size:.8rem; color:var(--muted); margin-top:4px; text-align:center; }
+  .frame { aspect-ratio:1; border-radius:10px; overflow:hidden; display:flex; align-items:center; justify-content:center; border:1px solid var(--line); }
+  .frame img { width:100%; height:100%; object-fit:contain; }
+  .checker { background:repeating-conic-gradient(#c9ccd3 0 25%, #fff 0 50%) 0 0/20px 20px; }
+  .spinner { width:34px; height:34px; border-radius:50%; border:4px solid #bbb; border-top-color:var(--accent); animation:spin 1s linear infinite; }
+  @keyframes spin { to { transform:rotate(360deg); } }
+  .status { font-size:.9rem; color:var(--muted); margin:10px 0; min-height:1.3em; overflow-wrap:anywhere; }
+  .status.error { color:var(--err); }
+  .actions { display:flex; gap:8px; flex-wrap:wrap; }
+  dialog { width:min(1100px,96vw); max-height:94vh; padding:14px; border:1px solid var(--line); border-radius:14px; background:var(--card); color:var(--text); }
+  dialog::backdrop { background:rgba(0,0,0,.65); }
+  dialog .toolbar { margin:0 0 10px; gap:8px 12px; }
+  button.active { background:var(--accent); border-color:var(--accent); color:#fff; }
+  #scroller { overflow:auto; height:62vh; border:1px solid var(--line); border-radius:10px; }
+  #stage { position:relative; margin:0 auto; }
+  #stage canvas { position:absolute; inset:0; width:100%; height:100%; }
+  #ghost { opacity:.3; }
+  #work { touch-action:none; cursor:crosshair; }
+  #ring { position:fixed; pointer-events:none; border:2px solid #fff; box-shadow:0 0 0 1px #000; border-radius:50%; transform:translate(-50%,-50%); display:none; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Hintergrund-Entferner</h1>
+  <p class="sub">Bilder hochladen, der Hintergrund wird automatisch entfernt. Die Verarbeitung passiert in deinem Browser, deine Bilder werden nicht hochgeladen.</p>
+
+  <label id="drop" tabindex="0">
+    <strong>Bilder hierher ziehen oder klicken</strong>
+    <span>JPG, PNG oder WebP · mehrere gleichzeitig möglich · Einfügen mit Strg+V</span>
+    <input id="file" type="file" accept="image/png,image/jpeg,image/webp" multiple hidden>
+  </label>
+
+  <div class="toolbar">
+    <label>Qualität
+      <select id="model">
+        <option value="isnet">Beste (größter Download)</option>
+        <option value="isnet_fp16">Gut (ca. 80 MB Modell)</option>
+        <option value="isnet_quint8">Schnell (ca. 40 MB Modell)</option>
+      </select>
+    </label>
+    <label>Neuer Hintergrund
+      <select id="bgMode">
+        <option value="">Transparent</option>
+        <option value="#ffffff">Weiß</option>
+        <option value="#000000">Schwarz</option>
+        <option value="custom">Eigene Farbe</option>
+      </select>
+    </label>
+    <input id="bgColor" type="color" value="#4f46e5" aria-label="Eigene Farbe" hidden>
+    <button id="all" disabled>Alle herunterladen</button>
+  </div>
+
+  <div id="list" aria-live="polite"></div>
+</main>
+
+<dialog id="editor">
+  <div class="toolbar">
+    <button id="restore" class="active">Wiederherstellen</button>
+    <button id="erase">Radieren</button>
+    <label>Pinsel <input id="size" type="range" min="4" max="150" value="40"></label>
+    <label>Zoom
+      <select id="zoom"><option value="1">Einpassen</option><option value="2">200 %</option><option value="4">400 %</option></select>
+    </label>
+    <button id="boost" title="Macht halb durchsichtige Stellen deckender">Blasse Stellen verstärken</button>
+    <button id="undo" disabled>Rückgängig</button>
+  </div>
+  <div id="scroller"><div id="stage" class="checker"><canvas id="ghost"></canvas><canvas id="work"></canvas></div></div>
+  <p class="status">Male über die Stellen, die fehlen. Entfernte Bereiche schimmern blass durch.</p>
+  <div class="actions">
+    <button id="apply" class="primary">Übernehmen</button>
+    <button id="cancel">Abbrechen</button>
+  </div>
+  <div id="ring"></div>
+</dialog>
+
+<script>
+// Manche Vorschau-Umgebungen leiten fetch per postMessage weiter und können
+// dabei keine URL-Objekte kopieren (DataCloneError). Deshalb als Text übergeben.
+const originalFetch = window.fetch;
+window.fetch = async (input, init) => {
+  const target = input instanceof URL ? input.href : input;
+  try {
+    return await originalFetch.call(window, target, init);
+  } catch (e) {
+    // Adresse merken, damit die Fehlermeldung sie anzeigen kann
+    window.lastFailedUrl = String(target.url || target);
+    throw e;
+  }
+};
+</script>
+
+<script type="module">
+const VERSION = "1.7.0";
+const SOURCES = [
+  `https://cdn.jsdelivr.net/npm/@imgly/background-removal@${VERSION}/+esm`,
+  `https://esm.sh/@imgly/background-removal@${VERSION}`
+];
+
+const $ = id => document.getElementById(id);
+const drop = $("drop"), fileInput = $("file"), list = $("list");
+const jobs = [];
+let libPromise = null;
+let queue = Promise.resolve();
+
+function loadLibrary() {
+  libPromise ??= (async () => {
+    let lastError;
+    for (const url of SOURCES) {
+      try {
+        const mod = await import(url);
+        const fn = mod.removeBackground || mod.default;
+        if (typeof fn === "function") return fn;
+        lastError = new Error("Funktion nicht gefunden");
+      } catch (e) { lastError = e; }
+    }
+    libPromise = null; // beim nächsten Versuch neu laden
+    throw lastError;
+  })();
+  return libPromise;
+}
+
+function currentColor() {
+  const mode = $("bgMode").value;
+  return mode === "custom" ? $("bgColor").value : mode;
+}
+
+function applyColor() {
+  const color = currentColor();
+  for (const job of jobs) {
+    job.resultFrame.classList.toggle("checker", !color);
+    job.resultFrame.style.backgroundColor = color;
+  }
+}
+
+function addFiles(files) {
+  for (const file of files) {
+    if (!file.type.startsWith("image/")) continue;
+    const job = createCard(file);
+    jobs.push(job);
+    enqueue(job);
+  }
+  applyColor();
+}
+
+function createCard(file) {
+  const el = document.createElement("article");
+  el.className = "item";
+  el.innerHTML = `
+    <div class="name"></div>
+    <div class="pair">
+      <figure><div class="frame"><img class="orig" alt="Originalbild"></div><figcaption>Original</figcaption></figure>
+      <figure><div class="frame result checker"></div><figcaption>Ohne Hintergrund</figcaption></figure>
+    </div>
+    <div class="status"></div>
+    <div class="actions">
+      <button class="primary save" disabled>Herunterladen</button>
+      <button class="edit" disabled>Nachbessern</button>
+      <button class="retry" hidden>Neu berechnen</button>
+      <button class="remove">Entfernen</button>
+    </div>`;
+  const name = file.name || "eingefuegt.png";
+  el.querySelector(".name").textContent = name;
+  const origUrl = URL.createObjectURL(file);
+  el.querySelector(".orig").src = origUrl;
+
+  const job = {
+    file, name, el, origUrl, resultUrl: null, result: null, removed: false,
+    resultFrame: el.querySelector(".result"),
+    status: el.querySelector(".status"),
+    save: el.querySelector(".save"),
+    retry: el.querySelector(".retry"),
+    edit: el.querySelector(".edit")
+  };
+  job.edit.onclick = () => openEditor(job).catch(e => setStatus(job, `Editor-Fehler: ${e.message}`, true));
+  job.save.onclick = () => download(job).catch(e => setStatus(job, `Export fehlgeschlagen: ${e.message}`, true));
+  job.retry.onclick = () => enqueue(job);
+  el.querySelector(".remove").onclick = () => {
+    job.removed = true;
+    URL.revokeObjectURL(job.origUrl);
+    if (job.resultUrl) URL.revokeObjectURL(job.resultUrl);
+    jobs.splice(jobs.indexOf(job), 1);
+    el.remove();
+    updateAllButton();
+  };
+  list.prepend(el);
+  return job;
+}
+
+function setStatus(job, text, isError = false) {
+  job.status.textContent = text;
+  job.status.classList.toggle("error", isError);
+}
+
+// Bilder nacheinander verarbeiten, damit der Speicher nicht überläuft
+function enqueue(job) {
+  job.retry.hidden = true;
+  job.save.disabled = job.edit.disabled = true;
+  job.result = null;
+  updateAllButton();
+  window.lastFailedUrl = "";
+  job.resultFrame.innerHTML = '<div class="spinner"></div>';
+  setStatus(job, "Wartet …");
+  queue = queue.then(() => processJob(job));
+}
+
+async function processJob(job) {
+  if (job.removed) return;
+  try {
+    setStatus(job, "Lade KI-Bibliothek …");
+    const removeBackground = await loadLibrary();
+    setStatus(job, "Starte …");
+    const blob = await removeBackground(job.file, {
+      model: $("model").value,
+      output: { format: "image/png" },
+      progress: (key, current, total) => {
+        if (key.startsWith("fetch") && total) {
+          setStatus(job, `Lade KI-Daten … ${Math.round(current / total * 100)} %`);
+        } else if (key.startsWith("compute")) {
+          setStatus(job, "Entferne Hintergrund …");
+        }
+      }
+    });
+    if (job.removed) return;
+    showResult(job, blob);
+    setStatus(job, "Fertig ✓ Fehlt etwas? Klicke auf „Nachbessern“.");
+  } catch (e) {
+    console.error(e);
+    job.resultFrame.replaceChildren();
+    const hint = window.self !== window.top || e.name === "DataCloneError"
+      ? "Die Seite läuft in einer Vorschau. Lade die HTML-Datei herunter und öffne sie direkt in Chrome, Edge oder Firefox."
+      : "Prüfe Internetverbindung, Werbeblocker und Firewall.";
+    const where = window.lastFailedUrl ? ` Nicht erreichbar: ${window.lastFailedUrl}` : "";
+    setStatus(job, `Fehler: ${e.message || e}. ${hint}${where} (Seite geöffnet über ${location.protocol})`, true);
+    job.retry.hidden = false;
+  }
+}
+
+function showResult(job, blob) {
+  if (job.resultUrl) URL.revokeObjectURL(job.resultUrl);
+  job.result = blob;
+  job.resultUrl = URL.createObjectURL(blob);
+  const img = new Image();
+  img.alt = "Bild ohne Hintergrund";
+  img.src = job.resultUrl;
+  job.resultFrame.replaceChildren(img);
+  job.save.disabled = job.edit.disabled = false;
+  job.retry.hidden = false;
+  updateAllButton();
+}
+
+// ---------- Nachbessern mit Pinsel ----------
+const editor = $("editor"), work = $("work"), ghost = $("ghost"), ring = $("ring");
+const ctx = work.getContext("2d");
+let editJob = null, mode = "restore", last = null, history = [];
+
+async function openEditor(job) {
+  const [original, cutout] = await Promise.all([createImageBitmap(job.file), createImageBitmap(job.result)]);
+  editJob = job;
+  history = [];
+  $("undo").disabled = true;
+  work.width = ghost.width = cutout.width;
+  work.height = ghost.height = cutout.height;
+  ghost.getContext("2d").drawImage(original, 0, 0, ghost.width, ghost.height);
+  ctx.drawImage(cutout, 0, 0);
+  original.close();
+  cutout.close();
+  editor.showModal();
+  $("zoom").value = "1";
+  layout();
+}
+
+function layout() {
+  const box = $("scroller");
+  const fit = Math.min((box.clientWidth - 2) / work.width, (box.clientHeight - 2) / work.height);
+  $("stage").style.width = work.width * fit * $("zoom").value + "px";
+  $("stage").style.height = work.height * fit * $("zoom").value + "px";
+}
+
+function remember() {
+  const copy = document.createElement("canvas");
+  copy.width = work.width;
+  copy.height = work.height;
+  copy.getContext("2d").drawImage(work, 0, 0);
+  history.push(copy);
+  if (history.length > 8) history.shift();
+  $("undo").disabled = false;
+}
+
+function dab(x, y, r) {
+  ctx.save();
+  ctx.beginPath();
+  ctx.arc(x, y, r, 0, Math.PI * 2);
+  ctx.clip();
+  ctx.clearRect(x - r, y - r, 2 * r, 2 * r);
+  if (mode === "restore") ctx.drawImage(ghost, 0, 0);
+  ctx.restore();
+}
+
+function paint(e) {
+  const rect = work.getBoundingClientRect();
+  const scale = work.width / rect.width;
+  const x = (e.clientX - rect.left) * scale, y = (e.clientY - rect.top) * scale;
+  const r = $("size").value / 2 * scale;
+  const from = last || { x, y };
+  const steps = Math.max(1, Math.ceil(Math.hypot(x - from.x, y - from.y) / (r / 3)));
+  for (let i = 1; i <= steps; i++) {
+    dab(from.x + (x - from.x) * i / steps, from.y + (y - from.y) * i / steps, r);
+  }
+  last = { x, y };
+}
+
+function moveRing(e) {
+  Object.assign(ring.style, { display: "block", left: e.clientX + "px", top: e.clientY + "px",
+    width: $("size").value + "px", height: $("size").value + "px" });
+}
+
+work.onpointerdown = e => {
+  if (e.button !== 0) return;
+  work.setPointerCapture(e.pointerId);
+  remember();
+  last = null;
+  paint(e);
+};
+work.onpointermove = e => { moveRing(e); if (work.hasPointerCapture(e.pointerId)) paint(e); };
+work.onpointerup = work.onpointercancel = () => { last = null; };
+work.onpointerleave = () => { ring.style.display = "none"; };
+
+for (const id of ["restore", "erase"]) {
+  $(id).onclick = () => {
+    mode = id;
+    $("restore").classList.toggle("active", id === "restore");
+    $("erase").classList.toggle("active", id === "erase");
+  };
+}
+$("zoom").onchange = layout;
+$("boost").onclick = () => {
+  remember();
+  const data = ctx.getImageData(0, 0, work.width, work.height);
+  const d = data.data;
+  // schwaches Rauschen (Alpha < 8) bleibt durchsichtig
+  for (let i = 3; i < d.length; i += 4) {
+    if (d[i] >= 8) d[i] = Math.round(255 * Math.pow(d[i] / 255, 0.4));
+  }
+  ctx.putImageData(data, 0, 0);
+};
+$("undo").onclick = () => {
+  const previous = history.pop();
+  if (!previous) return;
+  ctx.clearRect(0, 0, work.width, work.height);
+  ctx.drawImage(previous, 0, 0);
+  $("undo").disabled = !history.length;
+};
+$("cancel").onclick = () => editor.close();
+$("apply").onclick = () => {
+  const job = editJob;
+  work.toBlob(blob => {
+    if (!blob) { alert("Speichern fehlgeschlagen (Bild zu groß?)"); return; }
+    showResult(job, blob);
+    applyColor();
+    editor.close();
+  }, "image/png");
+};
+editor.onclose = () => { history = []; ring.style.display = "none"; };
+
+async function download(job) {
+  let blob = job.result;
+  const color = currentColor();
+  if (color) {
+    const bitmap = await createImageBitmap(blob);
+    const canvas = document.createElement("canvas");
+    canvas.width = bitmap.width;
+    canvas.height = bitmap.height;
+    const ctx = canvas.getContext("2d");
+    ctx.fillStyle = color;
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ctx.drawImage(bitmap, 0, 0);
+    bitmap.close();
+    blob = await new Promise(resolve => canvas.toBlob(resolve, "image/png"));
+    if (!blob) { setStatus(job, "Export fehlgeschlagen (Bild zu groß?)", true); return; }
+  }
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = job.name.replace(/\.[^.]+$/, "") + "-freigestellt.png";
+  document.body.append(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 10000);
+}
+
+function updateAllButton() {
+  $("all").disabled = !jobs.some(j => j.result);
+}
+
+$("all").onclick = async () => {
+  for (const job of jobs.filter(j => j.result)) {
+    await download(job);
+    await new Promise(r => setTimeout(r, 400));
+  }
+};
+
+fileInput.onchange = () => { addFiles(fileInput.files); fileInput.value = ""; };
+drop.onkeydown = e => {
+  if (e.key === "Enter" || e.key === " ") { e.preventDefault(); fileInput.click(); }
+};
+// Verhindert, dass der Browser daneben abgelegte Bilder einfach öffnet
+window.addEventListener("dragover", e => { e.preventDefault(); drop.classList.add("over"); });
+window.addEventListener("dragleave", e => { if (!e.relatedTarget) drop.classList.remove("over"); });
+window.addEventListener("drop", e => {
+  e.preventDefault();
+  drop.classList.remove("over");
+  addFiles(e.dataTransfer.files);
+});
+window.addEventListener("paste", e => addFiles(e.clipboardData.files));
+$("bgMode").onchange = () => { $("bgColor").hidden = $("bgMode").value !== "custom"; applyColor(); };
+$("bgColor").oninput = applyColor;
+</script>
+</body>
+</html>
